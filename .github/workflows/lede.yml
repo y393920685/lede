@@ -1,0 +1,158 @@
+# 
+# <https://github.com/KFERMercer/OpenWrt-CI>
+#
+# Copyright (C) 2019 P3TERX
+#
+# Copyright (C) 2020 KFERMercer
+#
+name: Build-OpenWrt-Lede
+
+on:
+  workflow_dispatch:  # 仅允许手动触发，无参数
+  schedule:
+    - cron: 0 20 * * *  # 每天UTC 20点（北京时间次日4点）定时触发
+    
+jobs:
+
+  build_openwrt:
+
+    name: 构建 OpenWrt 固件
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: 清理空间并初始化编译环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          echo "===== 开始清理Docker镜像 ====="
+          docker rmi `docker images -q` 2>/dev/null || echo "无Docker镜像可清理"
+          
+          echo "===== 开始删除冗余目录 ====="
+          sudo -E rm -rf /usr/share/dotnet /etc/mysql /etc/php /etc/apt/sources.list.d /usr/local/lib/android 2>/dev/null || echo "部分冗余目录不存在，跳过"
+          
+          echo "===== 锁定系统启动引导程序（避免更新故障） ====="
+          sudo -E apt-mark hold grub-efi-amd64-signed
+          
+          echo "===== 更新软件源 ====="
+          sudo -E apt update
+          
+          echo "===== 卸载不需要的软件包 ====="
+          sudo -E apt -y purge azure-cli* docker* ghc* zulu* llvm* firefox google* dotnet* powershell* openjdk* mysql* php* mongodb* dotnet* snap* 2>/dev/null || echo "部分软件包不存在，跳过卸载"
+          
+          echo "===== 系统全面升级 ====="
+          sudo -E apt -y full-upgrade
+          
+          echo "===== 安装OpenWrt编译必需依赖 ====="
+          sudo -E apt -y install ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool llvm lrzsz msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          
+          sudo -E systemctl daemon-reload
+          
+          echo "===== 清理系统冗余依赖 ====="
+          sudo -E apt -y autoremove --purge
+          sudo -E apt clean
+          
+          echo "===== 设置时区为亚洲/上海 ====="
+          sudo -E timedatectl set-timezone "Asia/Shanghai"
+      - name: 拉取OpenWrt源码
+        uses: actions/checkout@v4
+
+      - name: 进一步清理磁盘空间（Ubuntu）
+        uses: jlumbroso/free-disk-space@main
+        with:
+          # 启用会清理工具缓存，释放约6GB空间，但可能移除必需工具
+          tool-cache: true
+          # 以下选项默认均为true，可根据需要设为false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: 更新软件源（feeds）
+        run: |
+          echo "===== 启用helloworld第三方软件源 ====="
+          sed -i 's/#src-git helloworld/src-git helloworld/g' ./feeds.conf.default 2>/dev/null || echo "helloworld源已启用或配置文件不存在"
+          
+          echo "===== 更新所有软件源 ====="
+          ./scripts/feeds update -a
+          
+          echo "===== 安装所有软件包到编译环境 ====="
+          ./scripts/feeds install -a
+      - name: 生成默认配置文件并添加指定插件
+        run: |
+          echo "===== 生成OpenWrt默认配置文件（.config） ====="
+          make defconfig
+          
+          echo "===== 添加指定插件到配置文件 ====="
+          # 添加 luci-app-ttyd（网页终端）
+          echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config
+          # 添加 luci-app-upnp（UPnP端口映射）
+          echo "CONFIG_PACKAGE_luci-app-upnp=y" >> .config
+          # 添加 luci-app-zerotier（异地组网工具）
+          echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
+          # 添加 luci-app-tailscale（异地组网工具）
+          echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
+          # 添加 luci-app-openclash（代理工具）
+          echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
+          
+          echo "===== 重新生成配置，确保插件生效 ====="
+          make defconfig
+      - name: 备份现有.config文件
+        run: |
+          mkdir -p ./artifact/config_backup
+          cp .config ./artifact/config_backup/config_$(date +%Y%m%d_%H%M%S).bak
+      - name: 上传config
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_config
+          path: ./artifact/config_backup/
+      - name: 下载编译依赖包
+        run: |
+          echo "===== 多线程（16线程）下载所有依赖包（含新增插件） ====="
+          make download -j16
+      - name: 编译OpenWrt固件
+        run: |
+          echo "===== 开始编译固件（含新增插件，使用最大CPU核心数） ====="
+          make -j$(nproc) || {
+            echo "===== 多线程编译失败，切换到单线程编译并输出详细日志 ====="
+            make -j1 V=s
+          }
+          
+          echo "======================="
+          echo "磁盘使用情况："
+          echo "======================="
+          df -h
+          echo "======================="
+          du -h --max-depth=1 ./ --exclude=build_dir --exclude=bin
+          du -h --max-depth=1 ./build_dir
+          du -h --max-depth=1 ./bin
+      - name: 整理输出产物
+        run: |
+          echo "===== 创建产物存放目录 ====="
+          mkdir -p ./artifact/package ./artifact/buildinfo
+          
+          echo "===== 删除目标目录中重复的packages文件夹 ====="
+          rm -rf $(find ./bin/targets/ -type d -name "packages") 2>/dev/null || echo "无重复packages目录可删除"
+          
+          echo "===== 复制IPK软件包到产物目录 ====="
+          cp -rf $(find ./bin/packages/ -type f -name "*.ipk") ./artifact/package/ 2>/dev/null || echo "未找到IPK软件包"
+          
+          echo "===== 复制构建信息文件（.buildinfo/.manifest） ====="
+          cp -rf $(find ./bin/targets/ -type f -name "*.buildinfo" -o -name "*.manifest") ./artifact/buildinfo/ 2>/dev/null || echo "未找到构建信息文件"
+      - name: 上传构建信息
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_buildinfo
+          path: ./artifact/buildinfo/
+
+      - name: 上传IPK软件包
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_package
+          path: ./artifact/package/
+
+      - name: 上传OpenWrt固件
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_firmware
+          path: ./bin/targets/
