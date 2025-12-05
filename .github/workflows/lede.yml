@@ -80,27 +80,8 @@ jobs:
           ./scripts/feeds install -a
       - name: 生成默认配置文件并添加指定插件
         run: |
-          echo "===== 生成OpenWrt默认配置文件（.config） ====="
-          make defconfig
-          
-          echo "===== 添加指定插件到配置文件 ====="
-          # 添加 luci-app-ttyd（网页终端）
-          echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> .config
-          # 添加 luci-app-upnp（UPnP端口映射）
-          echo "CONFIG_PACKAGE_luci-app-upnp=y" >> .config
-          # 添加 luci-app-zerotier（异地组网工具）
-          echo "CONFIG_PACKAGE_luci-app-zerotier=y" >> .config
-          # 添加 luci-app-tailscale（异地组网工具）
-          echo "CONFIG_PACKAGE_luci-app-tailscale=y" >> .config
-          # 添加 luci-app-openclash（代理工具）
-          echo "CONFIG_PACKAGE_luci-app-openclash=y" >> .config
-          
           echo "===== 重新生成配置，确保插件生效 ====="
           make defconfig
-      - name: 备份现有.config文件
-        run: |
-          mkdir -p ./artifact/config_backup
-          cp .config ./artifact/config_backup/config_$(date +%Y%m%d_%H%M%S).bak
       - name: 上传config
         uses: actions/upload-artifact@v4
         with:
